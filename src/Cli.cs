@@ -69,13 +69,14 @@ internal static unsafe partial class Program
         catch { return ""; }
     }
 
-    static void WriteAllStdout(string text)
+    static void WriteAllStdout(string text) => WriteBytesStdout(Encoding.UTF8.GetBytes(text));
+
+    static void WriteBytesStdout(byte[] b)
     {
         try
         {
             nint h = GetStdHandle(STD_OUTPUT_HANDLE);
-            if (h == 0 || h == (nint)(-1)) return;
-            var b = Encoding.UTF8.GetBytes(text);
+            if (h == 0 || h == (nint)(-1) || b.Length == 0) return;
             fixed (byte* p = b) WriteFile(h, p, (uint)b.Length, out _, 0);
         }
         catch { }
@@ -141,6 +142,20 @@ internal static unsafe partial class Program
     static void OpenUrl(string url)
     {
         try { Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true }); } catch { }
+    }
+
+    // Ubica el bin de Git Bash (preferido sobre el bash de WSL para statuslines `bash ...`).
+    static string? FindGitBin()
+    {
+        string[] cands =
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Git", "bin"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Git", "bin"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Git", "bin"),
+        };
+        foreach (var d in cands)
+            if (File.Exists(Path.Combine(d, "bash.exe"))) return d;
+        return null;
     }
 
     static void EnsureTray()
@@ -247,12 +262,21 @@ internal static unsafe partial class Program
                         UseShellExecute = false,
                         CreateNoWindow = true,
                     };
+                    // Para statuslines basadas en `bash`: anteponer Git Bash al PATH del hijo,
+                    // si no `bash` resuelve al de WSL (que suele fallar). Claude Code usa Git Bash.
+                    string? gitBin = FindGitBin();
+                    if (gitBin != null)
+                        psi.Environment["PATH"] = gitBin + ";" + (Environment.GetEnvironmentVariable("PATH") ?? "");
                     var proc = Process.Start(psi)!;
-                    proc.StandardInput.Write(raw);
-                    proc.StandardInput.Close();
-                    string outp = proc.StandardOutput.ReadToEnd();
+                    // Passthrough de BYTES (sin recodificar) para no corromper ANSI/UTF-8 de tu barra.
+                    var inBytes = Encoding.UTF8.GetBytes(raw);
+                    proc.StandardInput.BaseStream.Write(inBytes, 0, inBytes.Length);
+                    proc.StandardInput.BaseStream.Flush();
+                    proc.StandardInput.BaseStream.Close();
+                    using var outMs = new MemoryStream();
+                    proc.StandardOutput.BaseStream.CopyTo(outMs);
                     proc.WaitForExit();
-                    WriteAllStdout(outp);
+                    WriteBytesStdout(outMs.ToArray());
                 }
             }
         }
